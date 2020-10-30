@@ -47,6 +47,84 @@ class SummaryWriter(DefaultSummaryWriter):
             for k, v in metric_dict.items():
                 w_hp.add_scalar(k, v)
 
+def calculate_profit(input_array, trading_fee):
+    """
+    Description:
+        This function takes a 2xn numpy array, where the first column consists of n prices and the second column consists of n, corresponding labels (0: Hold, 1: Buy, 2: Sell)
+    Arguments:
+        - input_array (2xn np.array):
+            0: prices
+            1:labels
+        - trading_fee (float): The trading fee of the market in percentage!!
+    Return:
+        - specific profit (float): the specific profit, calculated from the labels
+        - ret_array (5xn np.array): 
+            0: prices
+            1: the price if the action was hold
+            2: the price if the action was buy
+            3: the price if the action was sell
+            4: labels
+    """
+    
+    #check if the array has the correct shape:
+    if len(input_array.shape) != 2 or input_array.shape[1] != 2:
+        raise Exception("Your provided input_array does not satisfy the correct shape conditions")
+    
+    #convert trading fee from percentage to decimal
+    trading_fee = trading_fee/100
+
+    #extend the input_array
+    output_array = np.zeros(shape=(input_array.shape[0], 5))
+    output_array[:,0] = input_array[:,0]
+    output_array[:,1] = np.nan
+    output_array[:,2] = np.nan
+    output_array[:,3] = np.nan
+    output_array[:,4] = input_array[:,1]
+
+    #create the specific_profit variable
+    specific_profit = 0
+
+    #set the mode to buy
+    mode = 'buy'
+
+    #calculate the profit
+    for i in range(0, output_array.shape[0]):
+        #get the pred
+        pred = output_array[i,4]
+
+        #save the action
+        if pred == 0:
+            output_array[i, 1] = output_array[i, 0]
+            action = 'hold'
+        elif pred == 1:
+            output_array[i, 2] = output_array[i, 0]
+            action = 'buy'
+        elif pred == 2:
+            output_array[i, 3] = output_array[i, 0]
+            action = 'sell'
+
+        #do the trading
+        if mode == 'buy' and action == 'buy':
+            tc_buyprice = output_array[i, 0]                                     #tc = tradingcoin
+            """
+            brutto_tcamount = trading_amount/tc_buyprice
+            netto_tcamount = brutto_tcamount - brutto_tcamount*trading_fee
+            """
+            mode = 'sell'
+
+        elif mode == 'sell' and action == 'sell':
+            tc_sellprice = output_array[i, 0]
+            """
+            brutto_bcamount = tc_sellprice*netto_tcamount                        #bc = basecoin
+            netto_bcamount = brutto_bcamount - brutto_bcamount*trading_fee
+            localprofit = netto_bcamount-trading_amount
+            """
+            local_specific_profit = (tc_sellprice/tc_buyprice)*(1-trading_fee)*(1-trading_fee)-1
+            specific_profit += local_specific_profit
+            mode = 'buy'
+    
+    return specific_profit, output_array
+
 class DataBase():
     """
     Description:
@@ -230,6 +308,23 @@ class TrainDatabase(DataBase):
     def __init__(self, symbol, date_list):
         #calling the inheritance
         super().__init__(symbol, date_list)
+
+        #save the labeling methods currently available
+        self.labeling_methods = ["feature_extraction"]
+        self.auto_labeling_methods = ["feature_extraction"]
+        
+        #create the auto labelin methods (alm) dictionaries
+        self.alm_range = {
+            "feature_extraction": {
+                "hold_factor": (1,20),
+                "threshold": (0,100),
+                "distance": (0,10),
+                "prominence": (0,10),
+                "width": (0,20)
+            }
+        }
+        self.alm_optimal = {}
+
         #create the scalerslist
         self.scalers = []
 
@@ -317,14 +412,21 @@ class TrainDatabase(DataBase):
 
     def _labeling(self, method, verbose=False):
         
-        if method == "feature_extraction":
+        if method in self.labeling_methods:
             ret_list = self._feature_extraction_labeling(verbose=verbose)
         else:
             raise Exception("Your chosen labelingmethod is not available, please try again with another method")
 
         return ret_list
-
-    def _feature_extraction_labeling(self, verbose=False):
+    
+    """
+    All the different labeling methods follow:
+        Special Syntax:
+            -the name of the labeling method must be: "_" + "name" + "_labeling"
+        Arguments:
+            -parameter_dict (kwargs)
+    """
+    def _feature_extraction_labeling(self, **parameter_dict):
         
         #setup the return list
         ret_list = []
@@ -336,11 +438,6 @@ class TrainDatabase(DataBase):
                     "trend_macd_diff", "trend_ema_fast", "trend_adx_pos", "trend_vortex_ind_diff",
                     "trend_cci", "trend_kst_diff", "momentum_rsi", "momentum_tsi", "momentum_uo",
                     "momentum_stoch_signal", "momentum_wr", "momentum_ao", "momentum_roc"]
-        
-        #plotting setup if verbose
-        if verbose:
-            fig, ax = plt.subplots(nrows=2)
-            fig.show()
 
         #mainloop
         for index, df in enumerate(self.raw_data): 
@@ -359,41 +456,16 @@ class TrainDatabase(DataBase):
                 array = np.array(df[feature])
 
                 #find indeces of peaks and lows
-                peaks, _ = signal.find_peaks(array, distance=10)
-                lows, _ = signal.find_peaks(-array, distance=10)
+                peaks, _ = signal.find_peaks(array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
+                lows, _ = signal.find_peaks(-array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
 
                 #update scores in the data
-                data.iloc[lows, 2] += 1     #update the buy column
-                data.iloc[peaks, 3] += 1    #update the sell column
+                data.iloc[lows, 2] += 1                                 #update the buy column
+                data.iloc[peaks, 3] += 1                                #update the sell column
                 hold = np.ones(len(data))
                 hold[peaks] = 0
                 hold[lows] = 0
-                data["hold"] += hold/8      #update the hold column
-
-                if verbose:
-                    
-                    #set the right index at bsh
-                    data["bsh"] = data.iloc[:,1:4].idxmax(axis=1)
-                    data.loc[data["bsh"] == "hold", "bsh"] = 0 
-                    data.loc[data["bsh"] == "buy", "bsh"] = 1 
-                    data.loc[data["bsh"] == "sell", "bsh"] = 2
-
-                    #plotting
-                    fig.suptitle(f"Dataset: {index}")
-                    ax[0].cla()
-                    ax[1].cla()
-                    ax[0].grid()
-                    ax[1].grid()
-                    ax[0].set_title(f"Feature: {feature}")
-                    ax[0].plot(df.loc[0:120, feature])
-                    ax[0].plot(df.loc[lows, feature].loc[0:120], marker="o", linestyle="", color="green")
-                    ax[0].plot(df.loc[peaks, feature].loc[0:120], marker="o", linestyle="", color="red")
-                    ax[1].set_title("Close Data")
-                    ax[1].plot(data.loc[0:120, "close"])
-                    ax[1].plot(data.loc[0:120, "close"].loc[data["bsh"] == 1], marker="o", linestyle="", color="green")
-                    ax[1].plot(data.loc[0:120, "close"].loc[data["bsh"] == 2], marker="o", linestyle="", color="red")
-                    plt.pause(0.001)
-                    input()
+                data["hold"] += hold/parameter_dict["hold_factor"]      #update the hold column
 
             #set the right index at bsh
             data["bsh"] = data.iloc[:,1:4].idxmax(axis=1)
@@ -406,6 +478,23 @@ class TrainDatabase(DataBase):
         
         return ret_list
 
+    def optimize(self):
+        """
+        Description:
+            This method goes through all labeling methods in self.automatic_labeling_methods and optimizes their parameters for maximal profit
+        """
+
+        for index, labeling_method in enumerate(self.auto_labeling_methods):
+            
+            #get the labeling method
+            labeler = getattr(self, f"_{labeling_method}_labeling")
+            
+
+
+
+
+
+        
     def save(self, object_path):
         """
         Method for saving the object

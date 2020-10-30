@@ -277,10 +277,10 @@ train(run_iterable=RunBuilder.get_runs_iterator(params2), feature_list=["volatil
 """
 ToDo:
     Train Database:
-        -Implement max prof calc for tdb class
+        -Implement max prof calc for tdb class --> optimize()
         -Implement min height distance between buy and sell
         -Implement checker function to check out the labeling
-        -Implement function, which checks for negative trades
+        -Implement function, which gets all the pa values from the optimal labeling (to compare to agent)
         (-Implement balancing (Oversampling))
 
     RunManager:
@@ -288,6 +288,7 @@ ToDo:
         (-Find Solution for profit_per_intervall Logging)
         
     PerformanceAnalytics:
+        -Implement the calculate_profit() function and test for bugs
         -Implement max prof calc for pa class
 
     train function:
