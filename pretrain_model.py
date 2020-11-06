@@ -115,15 +115,15 @@ params = OrderedDict(
     hidden_size = [50, 100],
     dropout = [0.2, 0],
     batch_norm = [True, False],
-    advanced_linear = [True, False],
-    balancing_method = [1, 0]     #0: No Balancing, 1: Weigth tensor
+    advanced_linear = [True],
+    balancing_method = [1]     #0: No Balancing, 1: Weigth tensor
 )
 
 params2 = OrderedDict(
     num_layers = [2],
     lr = [0.01],
     batch_size = [200],
-    epochs = [2],
+    epochs = [10],
     hidden_size = [100],
     dropout = [0.2],
     batch_norm = [False],
@@ -271,24 +271,17 @@ def train(run_iterable, feature_list, name, performanceanayltics_path, traindata
 
 
 
-train(run_iterable=RunBuilder.get_runs_iterator(params2), feature_list=["volatility_bbhi", "volatility_bbli", "volatility_kchi", "volatility_kcli", "trend_macd_diff", "trend_vortex_ind_diff", "trend_kst_diff", "trend_aroon_ind", "trend_psar_up_indicator", "trend_psar_down_indicator"], name=datetime.datetime.now().strftime("%d-%m-%y--%H-%M-%S"), performanceanayltics_path="C:/Users/fabio/Desktop/projectastro/databases/PaDatabases/pa_4weeks-Jul-Aug-Sep-Oct", traindatabase_path="C:/Users/fabio/Desktop/projectastro/databases/TrainDatabases/tdb_march")
+train(run_iterable=RunBuilder.get_runs_iterator(params), feature_list=["close", "volume", "open", "volatility_bbhi", "volatility_bbli", "volatility_kchi", "volatility_kcli", "trend_macd_diff", "trend_vortex_ind_diff", "trend_kst_diff", "trend_aroon_ind", "trend_psar_up_indicator", "trend_psar_down_indicator"], name=datetime.datetime.now().strftime("%d-%m-%y--%H-%M-%S"), performanceanayltics_path="C:/Users/fabio/Desktop/projectastro/databases/PaDatabases/pa_4weeks-Jul-Aug-Sep-Oct", traindatabase_path="C:/Users/fabio/Desktop/projectastro/databases/TrainDatabases/tdb_march")
 
 
 """
 ToDo:
-    Train Database:
-        -Implement max prof calc for tdb class --> optimize()
-        -Implement min height distance between buy and sell
-        -Implement checker function to check out the labeling
-        -Implement function, which gets all the pa values from the optimal labeling (to compare to agent)
-        (-Implement balancing (Oversampling))
 
     RunManager:
-        -Logging of amount of negative and positiv trades
+        -Logging of specific_profit per interval in matplotlib graph or as a scalar
         (-Find Solution for profit_per_intervall Logging)
         
     PerformanceAnalytics:
-        -Implement the calculate_profit() function and test for bugs
         -Implement max prof calc for pa class
 
     train function:
@@ -297,4 +290,7 @@ ToDo:
 
     RunBuilder:
         -Implement Bayesion Optimization in RunBuilder
+
+    Train Database:
+        -Implement balancing (Oversampling)
 """
