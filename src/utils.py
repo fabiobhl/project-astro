@@ -24,6 +24,14 @@ from torch.utils.tensorboard import SummaryWriter as DefaultSummaryWriter
 import torch.nn.functional as F
 from torch.utils.tensorboard.summary import hparams
 
+#tune imports
+import ray
+from ray import tune
+from ray.tune.utils import pin_in_object_store, get_pinned_object
+from ray.tune.suggest.bayesopt import BayesOptSearch
+from ray.tune.suggest import ConcurrencyLimiter
+from ray.tune.suggest.hyperopt import HyperOptSearch
+
 #"keys" file import
 import sys
 import os
@@ -46,6 +54,84 @@ class SummaryWriter(DefaultSummaryWriter):
             w_hp.file_writer.add_summary(sei)
             for k, v in metric_dict.items():
                 w_hp.add_scalar(k, v)
+
+def calculate_profit(input_array, trading_fee):
+    """
+    Description:
+        This function takes a 2xn numpy array, where the first column consists of n prices and the second column consists of n, corresponding labels (0: Hold, 1: Buy, 2: Sell)
+    Arguments:
+        - input_array (2xn np.array):
+            0: prices
+            1:labels
+        - trading_fee (float): The trading fee of the market in percentage!!
+    Return:
+        - specific profit (float): the specific profit, calculated from the labels
+        - ret_array (5xn np.array): 
+            0: prices
+            1: the price if the action was hold
+            2: the price if the action was buy
+            3: the price if the action was sell
+            4: labels
+    """
+    
+    #check if the array has the correct shape:
+    if len(input_array.shape) != 2 or input_array.shape[1] != 2:
+        raise Exception("Your provided input_array does not satisfy the correct shape conditions")
+    
+    #convert trading fee from percentage to decimal
+    trading_fee = trading_fee/100
+
+    #extend the input_array
+    output_array = np.zeros(shape=(input_array.shape[0], 5))
+    output_array[:,0] = input_array[:,0]
+    output_array[:,1] = np.nan
+    output_array[:,2] = np.nan
+    output_array[:,3] = np.nan
+    output_array[:,4] = input_array[:,1]
+
+    #create the specific_profit variable
+    specific_profit = 0
+
+    #set the mode to buy
+    mode = 'buy'
+
+    #calculate the profit
+    for i in range(0, output_array.shape[0]):
+        #get the pred
+        pred = output_array[i,4]
+
+        #save the action
+        if pred == 0:
+            output_array[i, 1] = output_array[i, 0]
+            action = 'hold'
+        elif pred == 1:
+            output_array[i, 2] = output_array[i, 0]
+            action = 'buy'
+        elif pred == 2:
+            output_array[i, 3] = output_array[i, 0]
+            action = 'sell'
+
+        #do the trading
+        if mode == 'buy' and action == 'buy':
+            tc_buyprice = output_array[i, 0]                                     #tc = tradingcoin
+            """
+            brutto_tcamount = trading_amount/tc_buyprice
+            netto_tcamount = brutto_tcamount - brutto_tcamount*trading_fee
+            """
+            mode = 'sell'
+
+        elif mode == 'sell' and action == 'sell':
+            tc_sellprice = output_array[i, 0]
+            """
+            brutto_bcamount = tc_sellprice*netto_tcamount                        #bc = basecoin
+            netto_bcamount = brutto_bcamount - brutto_bcamount*trading_fee
+            localprofit = netto_bcamount-trading_amount
+            """
+            local_specific_profit = (tc_sellprice/tc_buyprice)*(1-trading_fee)*(1-trading_fee)-1
+            specific_profit += local_specific_profit
+            mode = 'buy'
+    
+    return specific_profit, output_array
 
 class DataBase():
     """
@@ -224,16 +310,40 @@ class TrainDatabase(DataBase):
     Description:
         This class is here to create data, on which you can train AI models.
     Arguments:
-        -symbol:        The Currencies you want to trade
-        -date_list:     List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
+        -symbol (string): The Currencies you want to trade (Binance Code)
+        -date_list (list): List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
+        -trading_fee (float): The tradingfee of your trading platform
     """
-    def __init__(self, symbol, date_list):
+    def __init__(self, symbol, date_list, trading_fee=0.075):
         #calling the inheritance
         super().__init__(symbol, date_list)
+
+        #save the trading_fee
+        self.trading_fee = trading_fee
+
+        #save the labeling methods currently available
+        self.labeling_methods = ["feature_extraction"]
+        self.auto_labeling_methods = ["feature_extraction"]
+        
+        #create the auto labelin methods (alm) dictionaries
+        self.alm_range = {
+            "feature_extraction": {
+                "hold_factor": tune.uniform(1,20),
+                "threshold": tune.uniform(0,100),
+                "distance": tune.uniform(1,10),
+                "prominence": tune.uniform(0,10),
+                "width": tune.uniform(1,20)
+            }
+        }
+        self.alm_optimal = {}
+
+        #run the optimization
+        self.optimize(trial_amount=100)
+
         #create the scalerslist
         self.scalers = []
 
-    def get_data(self, feature_list, feature_range=(-1,1), derived=True, batch_size=200, window_size=60, label_method="feature_extraction", test_percentage=0.2):
+    def get_data(self, feature_list, feature_range=(-1,1), derived=True, batch_size=200, window_size=60, labeling_method="feature_extraction", test_percentage=0.2):
         
         #select derived_data or raw_data
         if derived:
@@ -251,7 +361,7 @@ class TrainDatabase(DataBase):
         self.scalers = []
 
         #get the label_list
-        label_list = self._labeling(method=label_method)
+        label_list = self._labeling(labeling_method=labeling_method)
 
         #main data loop
         for index, df in enumerate(predata):
@@ -315,16 +425,26 @@ class TrainDatabase(DataBase):
 
         return (train_data, train_labels, test_data, test_labels)
 
-    def _labeling(self, method, verbose=False):
+    def _labeling(self, labeling_method):
         
-        if method == "feature_extraction":
-            ret_list = self._feature_extraction_labeling(verbose=verbose)
+        if labeling_method in self.labeling_methods:
+            #get the labeling method
+            labeler = getattr(self, f"_{labeling_method}_labeling")
+            #get the label_list
+            ret_list = labeler(parameter_dict=self.alm_optimal[labeling_method]["parameters"])
         else:
             raise Exception("Your chosen labelingmethod is not available, please try again with another method")
 
         return ret_list
-
-    def _feature_extraction_labeling(self, verbose=False):
+    
+    """
+    All the different labeling methods follow:
+        Special Syntax:
+            -the name of the labeling method must be: "_" + "name" + "_labeling"
+        Arguments:
+            -parameter_dict (kwargs)
+    """
+    def _feature_extraction_labeling(self, parameter_dict):
         
         #setup the return list
         ret_list = []
@@ -336,11 +456,6 @@ class TrainDatabase(DataBase):
                     "trend_macd_diff", "trend_ema_fast", "trend_adx_pos", "trend_vortex_ind_diff",
                     "trend_cci", "trend_kst_diff", "momentum_rsi", "momentum_tsi", "momentum_uo",
                     "momentum_stoch_signal", "momentum_wr", "momentum_ao", "momentum_roc"]
-        
-        #plotting setup if verbose
-        if verbose:
-            fig, ax = plt.subplots(nrows=2)
-            fig.show()
 
         #mainloop
         for index, df in enumerate(self.raw_data): 
@@ -359,41 +474,16 @@ class TrainDatabase(DataBase):
                 array = np.array(df[feature])
 
                 #find indeces of peaks and lows
-                peaks, _ = signal.find_peaks(array, distance=10)
-                lows, _ = signal.find_peaks(-array, distance=10)
+                peaks, _ = signal.find_peaks(array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
+                lows, _ = signal.find_peaks(-array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
 
                 #update scores in the data
-                data.iloc[lows, 2] += 1     #update the buy column
-                data.iloc[peaks, 3] += 1    #update the sell column
+                data.iloc[lows, 2] += 1                                 #update the buy column
+                data.iloc[peaks, 3] += 1                                #update the sell column
                 hold = np.ones(len(data))
                 hold[peaks] = 0
                 hold[lows] = 0
-                data["hold"] += hold/8      #update the hold column
-
-                if verbose:
-                    
-                    #set the right index at bsh
-                    data["bsh"] = data.iloc[:,1:4].idxmax(axis=1)
-                    data.loc[data["bsh"] == "hold", "bsh"] = 0 
-                    data.loc[data["bsh"] == "buy", "bsh"] = 1 
-                    data.loc[data["bsh"] == "sell", "bsh"] = 2
-
-                    #plotting
-                    fig.suptitle(f"Dataset: {index}")
-                    ax[0].cla()
-                    ax[1].cla()
-                    ax[0].grid()
-                    ax[1].grid()
-                    ax[0].set_title(f"Feature: {feature}")
-                    ax[0].plot(df.loc[0:120, feature])
-                    ax[0].plot(df.loc[lows, feature].loc[0:120], marker="o", linestyle="", color="green")
-                    ax[0].plot(df.loc[peaks, feature].loc[0:120], marker="o", linestyle="", color="red")
-                    ax[1].set_title("Close Data")
-                    ax[1].plot(data.loc[0:120, "close"])
-                    ax[1].plot(data.loc[0:120, "close"].loc[data["bsh"] == 1], marker="o", linestyle="", color="green")
-                    ax[1].plot(data.loc[0:120, "close"].loc[data["bsh"] == 2], marker="o", linestyle="", color="red")
-                    plt.pause(0.001)
-                    input()
+                data["hold"] += hold/parameter_dict["hold_factor"]      #update the hold column
 
             #set the right index at bsh
             data["bsh"] = data.iloc[:,1:4].idxmax(axis=1)
@@ -405,6 +495,190 @@ class TrainDatabase(DataBase):
             ret_list.append(data["bsh"].copy())
         
         return ret_list
+
+    def optimize(self, trial_amount, search_algo="bayesopt", max_workers=8, verbose=1):
+        """
+        Description:
+            This method goes through all labeling methods in self.automatic_labeling_methods and optimizes their parameters for maximal specific profit. It is built with ray tune therefore it is highly scalable.
+        Arguments:
+            - trial_amount (int): the amount of parameter-combinations that are going to be tested
+            - search_algo (string): the search algorithm with which it's going to get optimized [hyperopt, bayesopt]
+            - max_workers (int): how many parallel tasks it should run
+            - verbose (int): The Level of logging in the console (0, 1, 2)
+        Return:
+            - nothing
+            - updates the alm_optimal dictionary if the new best config is better than the old one
+            - for new optimizations to be saved, you need to save the object with the .save() method
+        """
+
+        for index, labeling_method in enumerate(self.auto_labeling_methods):
+            
+            #get the labeling method
+            labeler = getattr(self, f"_{labeling_method}_labeling")
+            
+            #get he price data
+            price_array = pd.DataFrame()
+            for data in self.raw_data:
+                df = pd.DataFrame()
+                df["close"] = data["close"].copy()
+                price_array = pd.concat([price_array, df], axis=0)
+            price_array = price_array.to_numpy()
+
+            #store the needed objects in raytune mainprocess
+            ray.init()
+            labeler_id = pin_in_object_store(labeler)
+            price_array_id = pin_in_object_store(price_array)
+            calculate_profit_id = pin_in_object_store(calculate_profit)
+
+            #function that gets passed to the bayesian optimizer
+            def objective(config):
+                
+                #get objects from central tune storage
+                labeler = get_pinned_object(labeler_id)
+                price_array = get_pinned_object(price_array_id)
+                calculate_profit = get_pinned_object(calculate_profit_id)
+
+                #get the labels from the specific method
+                label_list = labeler(config)
+
+                #create the array tha gets passed to the profit calculator
+                label_array = pd.concat(label_list, axis=0).to_numpy()
+                label_array = np.expand_dims(label_array, axis=1)
+                array = np.concatenate([price_array, label_array], axis=1)
+
+                specific_profit, _ = calculate_profit(array, self.trading_fee)
+
+                tune.report(specific_profit=specific_profit)
+                time.sleep(0.1)
+
+            #setup the searchalgo
+            if search_algo == "bayesopt":
+                search_alg = BayesOptSearch(random_search_steps=trial_amount/10)
+                search_alg = ConcurrencyLimiter(search_alg, max_concurrent=max_workers)
+            elif search_algo == "hyperopt":
+                #get the current best params
+                best_config = None
+                if labeling_method in self.alm_optimal.keys():
+                    best_config = [self.alm_optimal[labeling_method]["parameters"]]
+                
+                search_alg = HyperOptSearch(n_initial_points=trial_amount/10, points_to_evaluate=best_config)
+                search_alg = ConcurrencyLimiter(search_alg, max_concurrent=max_workers)
+            else:
+                raise Exception("You chose a Search Algorithm that is not available, please choose from this list: bayesopt, hyperopt")
+
+            #run the optimization
+            result = tune.run(objective, config=self.alm_range[labeling_method], metric="specific_profit", search_alg=search_alg, mode="max", num_samples=trial_amount, verbose=verbose)
+            
+            #save the best config in self.alm_optimal
+            if labeling_method not in self.alm_optimal.keys() or self.alm_optimal[labeling_method]["specific_profit"] < result.best_result["specific_profit"]:
+                self.alm_optimal[labeling_method] = {"parameters": result.get_best_config(),
+                                                    "specific_profit": result.best_result["specific_profit"]}
+
+            print(result.get_best_config())
+            print(result.best_result["specific_profit"])
+
+    def check_labeling(self, labeling_method="feature_extraction"):
+        """
+        Description:
+            Displays the best current labeling config in a plot
+        """
+        #get the labels
+        label_list = self._labeling(labeling_method="feature_extraction")
+        
+        #get the price data
+        data = pd.DataFrame()
+        for index, raw_data in enumerate(self.raw_data):
+            df = pd.DataFrame()
+            df["close"] = raw_data["close"].copy()
+            df["bsh"] = label_list[index]
+            data = pd.concat([data, df], axis=0)
+        
+        data["hold"] = np.nan
+        data["buy"] = np.nan
+        data["sell"] = np.nan
+        data.loc[data["bsh"] == 0, "hold"] = data["close"]
+        data.loc[data["bsh"] == 1, "buy"] = data["close"]
+        data.loc[data["bsh"] == 2, "sell"] = data["close"]
+
+        fig, ax = plt.subplots()
+
+        ax.plot(data.loc[:,"close"])
+        ax.plot(data.loc[:,"hold"], linestyle="", marker="o", color="gray")
+        ax.plot(data.loc[:,"buy"], linestyle="", marker="o", color="green")
+        ax.plot(data.loc[:,"sell"], linestyle="", marker="o", color="red")
+
+        plt.show()
+
+    def get_amount_trades(self, labeling_method="feature_extraction"):
+        """
+        Description:
+            Counts the amount of positive and negative trades
+        Return:
+            tuple of length 2 with: (amount_of_pos_trades, amount_of_neg_trades)
+        """
+
+        #get the labels
+        label_list = self._labeling(labeling_method="feature_extraction")
+        
+        #get the price data
+        data = pd.DataFrame()
+        for index, raw_data in enumerate(self.raw_data):
+            df = pd.DataFrame()
+            df["close"] = raw_data["close"].copy()
+            df["bsh"] = label_list[index]
+            data = pd.concat([data, df], axis=0)
+        
+        input_array = data.to_numpy()
+
+        #convert trading fee from percentage to decimal
+        trading_fee = self.trading_fee/100
+
+        #extend the input_array
+        output_array = np.zeros(shape=(input_array.shape[0], 5))
+        output_array[:,0] = input_array[:,0]
+        output_array[:,1] = np.nan
+        output_array[:,2] = np.nan
+        output_array[:,3] = np.nan
+        output_array[:,4] = input_array[:,1]
+
+        #create the count variable
+        pos_trades = 0
+        neg_trades = 0
+
+        #set the mode to buy
+        mode = 'buy'
+
+        #calculate the amounts
+        for i in range(0, output_array.shape[0]):
+            #get the pred
+            pred = output_array[i,4]
+
+            #save the action
+            if pred == 0:
+                output_array[i, 1] = output_array[i, 0]
+                action = 'hold'
+            elif pred == 1:
+                output_array[i, 2] = output_array[i, 0]
+                action = 'buy'
+            elif pred == 2:
+                output_array[i, 3] = output_array[i, 0]
+                action = 'sell'
+
+            #do the trading
+            if mode == 'buy' and action == 'buy':
+                tc_buyprice = output_array[i, 0]                                     #tc = tradingcoin
+                mode = 'sell'
+
+            elif mode == 'sell' and action == 'sell':
+                tc_sellprice = output_array[i, 0]
+                local_specific_profit = (tc_sellprice/tc_buyprice)*(1-trading_fee)*(1-trading_fee)-1
+                if local_specific_profit >= 0:
+                    pos_trades += 1
+                else:
+                    neg_trades += 1
+                mode = 'buy'
+        
+        return (pos_trades, neg_trades)
 
     def save(self, object_path):
         """
@@ -439,7 +713,7 @@ class PerformanceAnalytics(PerformanceAnalyticsDatabase):
         """
         Evaluates the performance of the network.
 
-        Args:
+        Arguments:
             network (nn.Module): The network, to be tested.
             feature_list (list): The list of features, that the network is expecting.
             feature_range (tuple): The range, to which the data should be scaled to e.g. (-1,1)
@@ -762,6 +1036,24 @@ class RunManager():
         amount_of_intervals = len(performance_data["interval_infos"])
         fig, ax = plt.subplots(nrows=math.ceil(amount_of_intervals/2), ncols=2)
 
+        for i in range(amount_of_intervals):
+            
+            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,0])
+            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,1])
+            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,2])
+            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,3])
+
+            title = f"{i}" + f" M: {performance_data['interval_infos'][i]['movement']}, L: {performance_data['interval_infos'][i]['duration']}, D: {performance_data['interval_infos'][i]['date_interval']}"
+            ax[math.floor(i/2), i%2].set_title(title, fontsize="7")
+            ax[math.floor(i/2), i%2].tick_params(labelsize=7)
+            fig.tight_layout()
+        
+        self.tb.add_figure("SProfit per Interval", fig, self.epoch.count)
+
+        #trading Activity per Interval
+        amount_of_intervals = len(performance_data["interval_infos"])
+        fig, ax = plt.subplots(nrows=math.ceil(amount_of_intervals/2), ncols=2)
+
         tas = trading_activity_interval[0]
         tae = trading_activity_interval[1]
 
@@ -799,6 +1091,6 @@ class RunManager():
         return preds.argmax(dim=1).eq(labels).sum().item()
 
 
-
 if __name__ == "__main__":
+    
     pass
