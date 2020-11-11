@@ -123,7 +123,7 @@ params2 = OrderedDict(
     num_layers = [2],
     lr = [0.01],
     batch_size = [200],
-    epochs = [10],
+    epochs = [5],
     hidden_size = [100],
     dropout = [0.2],
     batch_norm = [False],
@@ -270,16 +270,25 @@ def train(run_iterable, feature_list, name, performanceanayltics_path, traindata
         
 
 
+feature_list = ["volatility_bbhi", "volatility_bbli", "volatility_kchi", "volatility_kcli", "trend_macd_diff", "trend_vortex_ind_diff", "trend_kst_diff", "trend_aroon_ind", "trend_psar_up_indicator", "trend_psar_down_indicator"]
 
-train(run_iterable=RunBuilder.get_runs_iterator(params), feature_list=["close", "volume", "open", "volatility_bbhi", "volatility_bbli", "volatility_kchi", "volatility_kcli", "trend_macd_diff", "trend_vortex_ind_diff", "trend_kst_diff", "trend_aroon_ind", "trend_psar_up_indicator", "trend_psar_down_indicator"], name=datetime.datetime.now().strftime("%d-%m-%y--%H-%M-%S"), performanceanayltics_path="C:/Users/fabio/Desktop/projectastro/databases/PaDatabases/pa_4weeks-Jul-Aug-Sep-Oct", traindatabase_path="C:/Users/fabio/Desktop/projectastro/databases/TrainDatabases/tdb_march")
+name = datetime.datetime.now().strftime("%d-%m-%y--%H-%M-%S")
+name = "test"
+pa_path = "C:/Users/fabio/Desktop/projectastro/databases/PaDatabases/pa_4weeks-Jul-Aug-Sep-Oct"
+tdb_path = "C:/Users/fabio/Desktop/projectastro/databases/TrainDatabases/tdb_march"
+
+train(run_iterable=RunBuilder.get_runs_iterator(params2), feature_list=feature_list, name=name, performanceanayltics_path=pa_path, traindatabase_path=tdb_path)
 
 
 """
 ToDo:
 
+    Gameplan:
+        -Finish the RunManager001
+        -Debug the tdb001 to make ray tune faster
+
     RunManager:
-        -Logging of specific_profit per interval in matplotlib graph or as a scalar
-        (-Find Solution for profit_per_intervall Logging)
+        -Logging of specific_profit per interval in matplotlib graph
         
     PerformanceAnalytics:
         -Implement max prof calc for pa class

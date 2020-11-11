@@ -314,7 +314,7 @@ class TrainDatabase(DataBase):
         -date_list (list): List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
         -trading_fee (float): The tradingfee of your trading platform
     """
-    def __init__(self, symbol, date_list, trading_fee=0.075):
+    def __init__(self, symbol, date_list, opt_trial_amount=100, trading_fee=0.075, verbose=1):
         #calling the inheritance
         super().__init__(symbol, date_list)
 
@@ -338,7 +338,7 @@ class TrainDatabase(DataBase):
         self.alm_optimal = {}
 
         #run the optimization
-        self.optimize(trial_amount=100)
+        self.optimize(trial_amount=opt_trial_amount, verbose=verbose)
 
         #create the scalerslist
         self.scalers = []
@@ -781,6 +781,8 @@ class PerformanceAnalytics(PerformanceAnalyticsDatabase):
             #shorten the data to predictions length
             profit_data = profit_data.iloc[0:bsh.shape[0],:]
             profit_data["bsh"] = bsh
+            profit_data["sprofit"] = np.nan
+            profit_data["sprofit_accumulated"] = np.nan
 
             if verbose:
                 fig, ax = plt.subplots()
@@ -825,6 +827,9 @@ class PerformanceAnalytics(PerformanceAnalyticsDatabase):
                         """
                         local_specific_profit = (tc_sellprice/tc_buyprice)*(1-trading_fee)*(1-trading_fee)-1
                         specific_profit += local_specific_profit
+
+                        profit_data[i,5] = local_specific_profit
+                        profit_data[i,6] = specific_profit
                         mode = 'buy'
             
 
@@ -1032,21 +1037,31 @@ class RunManager():
         self.tb.add_scalar('Specific Profit Rate', specific_profit_rate, self.epoch.count)
         self.tb.add_scalar('Specific Profit Stability', specific_profit_stability, self.epoch.count)
 
-        #trading Activity per Interval
+        #Specific Profit per Interval
         amount_of_intervals = len(performance_data["interval_infos"])
-        fig, ax = plt.subplots(nrows=math.ceil(amount_of_intervals/2), ncols=2)
+        fig, ax = plt.subplots(nrows=2)
 
         for i in range(amount_of_intervals):
             
-            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,0])
-            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,1])
-            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,2])
-            ax[math.floor(i/2), i%2].plot(performance_data["trading_per_interval"][i][tas:tae,3])
+            y = performance_data["trading_per_interval"][i][:,5].astype(np.double)
+            mask = np.isfinite(y)
+            x = np.arange(0,len(y),1)
+            ax[0].plot(x[mask], y[mask], label=f"{i}")
 
-            title = f"{i}" + f" M: {performance_data['interval_infos'][i]['movement']}, L: {performance_data['interval_infos'][i]['duration']}, D: {performance_data['interval_infos'][i]['date_interval']}"
-            ax[math.floor(i/2), i%2].set_title(title, fontsize="7")
-            ax[math.floor(i/2), i%2].tick_params(labelsize=7)
-            fig.tight_layout()
+
+            y = performance_data["trading_per_interval"][i][:,6].astype(np.double)
+            mask = np.isfinite(y)
+            x = np.arange(0,len(y),1)
+            ax[1].plot(x[mask], y[mask], label=f"{i}", drawstyle="steps")
+
+        ax[0].set_title("SProfit", fontsize="7")
+        ax[1].set_title("Accumulated SProfit", fontsize="7")
+        ax[0].tick_params(labelsize=7)
+        ax[1].tick_params(labelsize=7)
+        ax[0].set_xlim(left=0)
+        ax[1].set_xlim(left=0)
+        fig.legend()
+        fig.tight_layout()
         
         self.tb.add_figure("SProfit per Interval", fig, self.epoch.count)
 
