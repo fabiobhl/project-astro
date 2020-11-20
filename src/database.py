@@ -95,7 +95,7 @@ class DataBase():
             -save_path (string):        The location, where the folder gets created (Note: The name of the folder should be in the save_path e.g: "C:/.../desired_name")
             -symbol (string):           The Cryptocurrency you want to trade (Note: With accordance to the Binance API)
             -date_list (list):          List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
-            -candle_interval (string):  On what interval the candlestick data should be downloaded   
+            -candlestick_interval (string):  On what interval the candlestick data should be downloaded   
         Return:
             - nothing, creates a folder and multiple with multiple files inside
         """
@@ -263,6 +263,27 @@ class DataBase():
         else:
             raise Exception("Mutpile date interval acces has not been implemented yet")
 
+class Wrapper(DataBase):
+
+    def __init__(self, path, device=None):
+        #save the path
+        self.path = path
+        #setup dbid
+        self.dbid = dbidReader(path=self.path)
+        #get the device
+        if device == None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+
+        #get id
+        self.id = uuid.uuid1()
+        #create temporary folder
+        os.mkdir(f"{self.path}/{self.id}")
+    
+    def __del__(self):
+        shutil.rmtree(f"{self.path}/{self.id}")
+
 class TrainDataBase(DataBase):
     """
     Description:
@@ -291,7 +312,7 @@ class TrainDataBase(DataBase):
             }
         }
 
-    def get_wrapper(self, feature_list, feature_range=(-1,1), scaling_mode="globally", data_type="derived_data", batch_size=200, window_size=60, labeling_method="feature_extraction", test_percentage=0.2):
+    def get_wrapper(self, feature_list, feature_range=(-1,1), scaling_mode="globally", data_type="derived_data", batch_size=200, window_size=60, labeling_method="feature_extraction", test_percentage=0.2, device=None):
         
         #check if TDB was optimized
         if not os.path.isfile(f"{self.path}/labels_0"):
@@ -299,7 +320,7 @@ class TrainDataBase(DataBase):
 
         wrapper = TrainDataBaseWrapper(path=self.path, feature_list=feature_list, feature_range=feature_range, scaling_mode=scaling_mode,
                                        data_type=data_type, batch_size=batch_size, window_size=window_size, labeling_method=labeling_method,
-                                       test_percentage=test_percentage)
+                                       test_percentage=test_percentage, device=device)
         
         return wrapper
 
@@ -403,7 +424,7 @@ class TrainDataBase(DataBase):
             labeler = getattr(self, f"_{labeling_method}_labeling")
 
             #function that gets passed to the bayesian optimizer
-            def objective(config):
+            def objective(config, checkpoint_dir=None):
                 #get the labels from the specific method
                 label_list = labeler(config)
 
@@ -439,7 +460,7 @@ class TrainDataBase(DataBase):
                 raise Exception("You chose a Search Algorithm that is not available, please choose from this list: bayesopt, hyperopt")
 
             #run the optimization
-            result = tune.run(objective, config=self.alm_range[labeling_method], metric="specific_profit", search_alg=search_alg, mode="max", num_samples=trial_amount, verbose=verbose)
+            result = tune.run(objective, config=self.alm_range[labeling_method], metric="specific_profit", search_alg=search_alg, mode="max", num_samples=trial_amount, verbose=verbose, keep_checkpoints_num=0)
             
             #save the best config in self.alm_optimal
             if labeling_method not in self.dbid["alm_optimal"].keys() or self.dbid["alm_optimal"][labeling_method]["specific_profit"] < result.best_result["specific_profit"]:
@@ -591,18 +612,10 @@ class TrainDataBase(DataBase):
 
         return obj
 
-class TrainDataBaseWrapper(DataBase):
+class TrainDataBaseWrapper(Wrapper):
 
-    def __init__(self, path, feature_list, feature_range, scaling_mode, data_type, batch_size, window_size, labeling_method, test_percentage, device=None):
-        #save the path
-        self.path = path
-        #setup dbid
-        self.dbid = dbidReader(path=self.path)
-        #get the device
-        if device == None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device(device)
+    def __init__(self, path, feature_list, feature_range, scaling_mode, data_type, batch_size, window_size, labeling_method, test_percentage, device):
+        super().__init__(path=path, device=device)
 
         #save the variables
         self.feature_list = feature_list
@@ -613,12 +626,6 @@ class TrainDataBaseWrapper(DataBase):
         self.window_size = window_size
         self.labeling_method = labeling_method
         self.test_percentage = test_percentage
-
-        #get id
-        self.id = uuid.uuid1()
-
-        #create temporary folder
-        os.mkdir(f"{self.path}/{self.id}")
 
         #prepare the data
         self._prepare_data()
@@ -725,26 +732,48 @@ class PerformanceAnalyticsDatabase(DataBase):
         -symbol:        The Currencies you want to trade
         -date_list:     List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
     """
-    def __init__(self, symbol, date_list):
-        super().__init__(symbol, date_list)
+    def __init__(self, path):
+        super().__init__(path)
 
-    def get_data(self, feature_list, derived=True, scaled=True, feature_range=(-1,1), batch_size=200, window_size=60):
+    def get_wrapper(self, feature_list, feature_range=(-1,1), scaling_mode="locally", data_type="derived_data", batch_size=200, window_size=60, device=None):
 
-        if not derived:
-            data_list = self.raw_data.copy()
-        else:
-            data_list = self.derived_data.copy()
+        wrapper = PerformanceAnalyticsDatabaseWrapper(path=self.path, feature_list=feature_list, feature_range=feature_range, scaling_mode=scaling_mode,
+                                                      data_type=data_type, batch_size=batch_size, window_size=window_size, device=device)
 
-        ret_list = []
+        return wrapper
 
-        for df in data_list:
+class PerformanceAnalyticsDatabaseWrapper(Wrapper):
+    
+    def __init__(self, path, feature_list, feature_range, scaling_mode, data_type, batch_size, window_size, device=None):
+        super().__init__(path=path, device=device)
+
+        #save the variables
+        self.feature_list = feature_list
+        self.feature_range = feature_range
+        self.scaling_mode = scaling_mode
+        self.data_type = data_type
+        self.batch_size = batch_size
+        self.window_size = window_size
+        
+        #prepare the data
+        self._prepare_data()
+
+        #load in the mmaps
+        self.mmaps = [np.load(file=f"{self.path}/{self.id}/data{i}.npy", mmap_mode="r") for i in range(len(self.dbid["date_list"]))]
+
+    def _prepare_data(self):
+
+        for i in range(len(self.dbid["date_list"])):
             
-            #select the features
-            data = df[feature_list].to_numpy()
+            #load in data/select the features
+            data = self[self.data_type, i, :, self.feature_list].to_numpy()
 
-            #scale if desired
-            scaler = preprocessing.MinMaxScaler(feature_range=feature_range, copy=False)
-            scaler.fit_transform(data)
+            if self.scaling_mode == "locally":
+                #scale if desired
+                scaler = preprocessing.MinMaxScaler(feature_range=self.feature_range, copy=False)
+                scaler.fit_transform(data)
+            else:
+                raise Exception("Your desired scaling mode has not been implemented yet")
 
             #sample/batch the data
             shape = data.shape
@@ -753,40 +782,37 @@ class PerformanceAnalyticsDatabase(DataBase):
             #flatten the array
             data = data.flatten()
 
-            features_amount = len(feature_list)
+            features_amount = len(self.feature_list)
             #amount of elements in one window
-            window_elements = window_size*features_amount
+            window_elements = self.window_size*features_amount
             #amount of elements to skip in next window
             elements_skip = features_amount
             #amount of windows to generate
-            windows_amount = length-window_size
+            windows_amount = length-self.window_size
 
             #define the indexer
             indexer = np.arange(window_elements)[None, :] + elements_skip*np.arange(windows_amount)[:, None]
 
             #get the samples
-            batches = data[indexer].reshape(windows_amount, window_size, features_amount)
-            batches_amount = math.floor(batches.shape[0]/batch_size)
-            batches = batches[0:batches_amount*batch_size,:,:]
-            batches = batches.reshape(batches_amount, batch_size, window_size, features_amount)
+            batches = data[indexer].reshape(windows_amount, self.window_size, features_amount)
+            batches_amount = math.floor(batches.shape[0]/self.batch_size)
+            batches = batches[0:batches_amount*self.batch_size,:,:]
+            batches = batches.reshape(batches_amount, self.batch_size, self.window_size, features_amount)
 
-            #append to ret_list
-            ret_list.append(batches)
+            #save to disk
+            np.save(f"{self.path}/{self.id}/data{i}",batches)
 
-        return ret_list
+    def data(self, index):
+        data = self.mmaps[index]
 
-    @classmethod
-    def create(self, save_path, symbol, date_list, candlestick_interval="1m"):
-        #restrict the length of the datelist to 1
-        if len(date_list) > 1:
-            raise Exception("A TrainDataBase can only consist of 1 dateinterval")
+        for i in range(data.shape[0]):
+            batch = np.array(data[i])
+    
+            yield torch.tensor(batch).to(self.device)
 
-        obj = super().create(save_path, symbol, date_list, candlestick_interval)
-
-        #add things to the dbid
-        obj.dbid["alm_optimal"] = {}
-
-        return obj
+    def __del__(self):
+        del self.mmaps
+        shutil.rmtree(f"{self.path}/{self.id}")
 
 if __name__ == "__main__":
     pass
