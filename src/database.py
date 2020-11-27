@@ -97,14 +97,14 @@ class DataBase():
             -date_list (list):          List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
             -candlestick_interval (string):  On what interval the candlestick data should be downloaded   
         Return:
-            - nothing, creates a folder and multiple with multiple files inside
+            - nothing, creates a folder with multiple files inside
         """
         #check if the specified directory already exists
         if os.path.isdir(save_path):
             raise Exception("Please choose a directory, that does not already exist")
         
         """
-        Download the data and add the tas, and add it to the raw_data_list which then is returned
+        Download the data, add the tas
         """
         #create the client
         client = Client(api_key=keys.key, api_secret=keys.secret)
@@ -154,7 +154,7 @@ class DataBase():
 
 
         """
-        Diff, pct_change or do nothing with the features, to give the agent a better sense of time and add it to the derived_data_list, which is returned in the end
+        Diff, pct_change
         """
         #create list to append to
         derived_data_list = []
@@ -261,7 +261,7 @@ class DataBase():
         
         #multiple date interval access
         else:
-            raise Exception("Mutpile date interval acces has not been implemented yet")
+            raise Exception("Mutpile date interval access has not been implemented yet")
 
 class Wrapper(DataBase):
 
