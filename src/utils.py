@@ -27,7 +27,7 @@ class SummaryWriter(DefaultSummaryWriter):
 def calculate_profit(input_array, trading_fee):
     """
     Description:
-        This function takes a 2xn numpy array, where the first column consists of n prices and the second column consists of n, corresponding labels (0: Hold, 1: Buy, 2: Sell)
+        This function takes a nx2 numpy array, where the first column consists of n prices and the second column consists of n, corresponding labels (0: Hold, 1: Buy, 2: Sell)
     Arguments:
         - input_array (2xn np.array):
             0: prices
@@ -79,6 +79,8 @@ def calculate_profit(input_array, trading_fee):
         elif pred == 2:
             output_array[i, 3] = output_array[i, 0]
             action = 'sell'
+        else:
+            raise Exception(f"Your labels contained values that are not valid! value:{pred}")
 
         #do the trading
         if mode == 'buy' and action == 'buy':

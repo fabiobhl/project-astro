@@ -35,10 +35,25 @@ from ray.tune.suggest.bayesopt import BayesOptSearch
 from ray.tune.suggest import ConcurrencyLimiter
 from ray.tune.suggest.hyperopt import HyperOptSearch
 
+#dash imports
+import dash
+import dash_core_components as dcc
+import dash_html_components as html
+import plotly.express as px
+import plotly.graph_objs as go
+
 #pytorch imports
 import torch
 
 class dbidReader():
+    """
+    Description:
+        Class which can be used like a dictionary. It writes all the changes to the harddisk.
+        You must dump the dbidReader, after you changed a variable in the dictionary through chained access (i.e dbid[alm_optimal][feature_extraction] = 0).
+        Otherwise your changed variable wont be saved.
+    Arguments:
+        -path (string):     Path of the database
+    """
 
     def __init__(self, path):
         self.path = f"{path}/dbid.json"
@@ -68,6 +83,7 @@ class DataBase():
     Description:
         This is the base Database class, on which every other Database Objects builds upon.
     Arguments:
+        -path (string): Path of the Database
     """
     def __init__(self, path):
         #save the path
@@ -92,10 +108,10 @@ class DataBase():
         Description:
             This method creates a DataBase-Folder at a given location with the specified data.           
         Arguments:
-            -save_path (string):        The location, where the folder gets created (Note: The name of the folder should be in the save_path e.g: "C:/.../desired_name")
-            -symbol (string):           The Cryptocurrency you want to trade (Note: With accordance to the Binance API)
-            -date_list (list):          List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
-            -candlestick_interval (string):  On what interval the candlestick data should be downloaded   
+            -save_path (string):            The location, where the folder gets created (Note: The name of the folder should be in the save_path e.g: "C:/.../desired_name")
+            -symbol (string):               The Cryptocurrency you want to trade (Note: With accordance to the Binance API)
+            -date_list (list):              List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
+            -candlestick_interval (string): On what interval the candlestick data should be downloaded   
         Return:
             - nothing, creates a folder with multiple files inside
         """
@@ -248,7 +264,7 @@ class DataBase():
             #load in the data
             data = pd.read_csv(filepath_or_buffer=f"{self.path}/{indices[0]}_{indices[1]}", usecols=indices[3])
 
-            data = data.iloc[indices[2],:]
+            data = data.iloc[indices[2],:].reset_index(drop=True)
 
             #convert the date columns
             if "close_time" in data.columns:
@@ -264,6 +280,14 @@ class DataBase():
             raise Exception("Mutpile date interval access has not been implemented yet")
 
 class Wrapper(DataBase):
+    """
+    Description:
+        Wrapper is used to wrap around a database and prepare the data to your liking: sampling, rolling, shuffling, scaling, balancing, ...
+        A new folder is created for every instance and gets deleted, as soon as the instance goes out of scope.
+    Arguments:
+        path (string):      Path of the Database you want your wrapper to wrap around
+        device (string):    Device on which your Wrapper should work on (i.e. cpu, gpu), if this arguments is not set it uses the gpu, if there is one available
+    """
 
     def __init__(self, path, device=None):
         #save the path
@@ -287,11 +311,9 @@ class Wrapper(DataBase):
 class TrainDataBase(DataBase):
     """
     Description:
-        This is a Class that Wraps around a TrainDataBase. This kind of DataBase can be created with the create() method.
+        This Database can be used for supervised training of time-series models. To create a TrainDataBase, use the create method.
     Arguments:
-        -symbol (string): The Currencies you want to trade (Binance Code)
-        -date_list (list): List of datetime.date objects in the form: [[startdate, enddate], [startdate, enddate], ...]
-        -trading_fee (float): The tradingfee of your trading platform
+        -path (string):     The path of your TrainDataBase
     """
     def __init__(self, path):
         #calling the inheritance
@@ -308,12 +330,26 @@ class TrainDataBase(DataBase):
                 "threshold": tune.uniform(0,100),
                 "distance": tune.uniform(1,10),
                 "prominence": tune.uniform(0,10),
-                "width": tune.uniform(1,20)
+                "width": tune.uniform(1,20),
+                "window_size": tune.uniform(60, 1500)
             }
         }
 
     def get_wrapper(self, feature_list, feature_range=(-1,1), scaling_mode="globally", data_type="derived_data", batch_size=200, window_size=60, labeling_method="feature_extraction", test_percentage=0.2, device=None):
-        
+        """
+        Description:
+            This method returns a wrapper with the prepared data.
+        Arguments:
+            -feature_list (list):               A list of features you want to feed to your Neural Net
+            -feature_range (tuple):             To what range the features get scaled
+            -scaling_mode (string):             Wheter to scale every window by itself, or scale globally over the whole database
+            -data_type (string):                What kind of data you wanna use (i.e. raw_data, changes, ...)
+            -batch_size (int):                  Size of the batches
+            -window_sie (int):                  Size of the rolling window
+            -labeling_method (string):          Method with, which the labels were created
+            -test_percentage (float):           What percentage of the data should be used as test data
+            -device (string):                   On what device should the wrapper operate
+        """
         #check if TDB was optimized
         if not os.path.isfile(f"{self.path}/labels_0"):
             raise Exception("Before you can get a Wrapper you need to optimize your DataBase atleast once")
@@ -347,11 +383,8 @@ class TrainDataBase(DataBase):
         Arguments:
             -parameter_dict (kwargs)
     """
-    def _feature_extraction_labeling(self, parameter_dict):
+    def _feature_extraction_labeling(self, window_size, trading_fee, search_algo, trial_amount, max_workers, verbose):
         
-        #setup the return list
-        ret_list = []
-
         #the features with which we are going to determine the peaks and lows
         feature_list = ["close", "volume_obv", "volume_cmf", "volume_fi", "momentum_mfi",
                     "volume_vwap", "volatility_bbm", "volatility_bbh", "volatility_bbp",
@@ -360,48 +393,149 @@ class TrainDataBase(DataBase):
                     "trend_cci", "trend_kst_diff", "momentum_rsi", "momentum_tsi", "momentum_uo",
                     "momentum_stoch_signal", "momentum_wr", "momentum_ao", "momentum_roc"]
 
-        #mainloop
-        for index in range(len(self.dbid["date_list"])): 
+        #the range of the parameters of the labeling process
+        parameter_range = {
+            "hold_factor": tune.uniform(1,20),
+            "threshold": tune.uniform(0,100),
+            "distance": tune.uniform(1,10),
+            "prominence": tune.uniform(0,10),
+            "width": tune.uniform(1,20)
+        }
+
+        #check if old labels are available
+        old_labels_available = True if "feature_extraction" in self.dbid["alm_optimal"].keys() else False
+
+        #load in the data
+        df = self["raw_data", 0, :, feature_list]
+
+        #create the data were are going to work on
+        data = pd.DataFrame()
+        data["close"] = df["close"]
+        data["hold"] = 0
+        data["buy"] = 0
+        data["sell"] = 0
+        data["bsh"] = np.nan
+
+        #calculate the amount of windows needed
+        amount_of_windows = math.ceil(data.shape[0]/window_size)
+
+        #outer labeling loop
+        for i in range(amount_of_windows):
             
-            #load in the data
-            df = self["raw_data", index, :, feature_list]
-
-            #create the data were are going to work on
-            data = pd.DataFrame()
-            data["close"] = df["close"]
-            data["hold"] = 0
-            data["buy"] = 0
-            data["sell"] = 0
-            data["bsh"] = np.nan
-
-            #labeling loop
-            for feature in feature_list:
+            def objective(parameter_dict, only_labeling=False):
                 
-                #get the feature array
-                array = np.array(df[feature])
+                #get the window
+                window = df.iloc[i*window_size:(i+1)*window_size,:].copy().reset_index(drop=True)
+                data_window = data.iloc[i*window_size:(i+1)*window_size,:].copy().reset_index(drop=True)
 
-                #find indeces of peaks and lows
-                peaks, _ = signal.find_peaks(array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
-                lows, _ = signal.find_peaks(-array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
+                #inner labeling loop
+                for feature in feature_list:
+                    
+                    #get the feature array
+                    array = np.array(window[feature])
 
-                #update scores in the data
-                data.iloc[lows, 2] += 1                                 #update the buy column
-                data.iloc[peaks, 3] += 1                                #update the sell column
-                hold = np.ones(len(data))
-                hold[peaks] = 0
-                hold[lows] = 0
-                data["hold"] += hold/parameter_dict["hold_factor"]      #update the hold column
+                    #find indeces of peaks and lows
+                    peaks, _ = signal.find_peaks(array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
+                    lows, _ = signal.find_peaks(-array, threshold=parameter_dict["threshold"], distance=parameter_dict["distance"], prominence=parameter_dict["prominence"], width=parameter_dict["width"])
 
-            #set the right index at bsh
-            data["bsh"] = data.iloc[:,1:4].idxmax(axis=1)
-            data.loc[data["bsh"] == "hold", "bsh"] = 0 
-            data.loc[data["bsh"] == "buy", "bsh"] = 1 
-            data.loc[data["bsh"] == "sell", "bsh"] = 2
+                    #update scores in the data
+                    data_window.iloc[lows, 2] += 1                                 #update the buy column
+                    data_window.iloc[peaks, 3] += 1                                #update the sell column
+                    hold = np.ones(len(data_window))
+                    hold[peaks] = 0
+                    hold[lows] = 0
+                    data_window["hold"] += hold/parameter_dict["hold_factor"]      #update the hold column
+                
+                #set the right index at bsh
+                data_window["bsh"] = data_window.iloc[:,1:4].idxmax(axis=1)
+                data_window.loc[data_window["bsh"] == "hold", "bsh"] = 0 
+                data_window.loc[data_window["bsh"] == "buy", "bsh"] = 1 
+                data_window.loc[data_window["bsh"] == "sell", "bsh"] = 2
+                
+                if not only_labeling:
+                    #create array for profit calcs
+                    profit_array = np.array(data_window.iloc[:,[0, 4]])
 
-            #append the labels to the return list
-            ret_list.append(data["bsh"])
-        
-        return ret_list
+                    #run profit calcs
+                    specific_profit, _ = calculate_profit(input_array=profit_array, trading_fee=trading_fee)
+
+                    #tune.report(specific_profit=specific_profit)
+                    return specific_profit
+                
+                else:
+                    return data_window.iloc[:,4]
+
+            class Objective(tune.Trainable):
+                def setup(self, config):
+                    # config (dict): A dict of hyperparameters
+                    self.parameter_dict = config
+                
+                def step(self):
+                    specific_profit = objective(self.parameter_dict)
+
+                    return {"specific_profit": specific_profit}
+
+            #run ray tune
+            #setup the searchalgo
+            if search_algo == "bayesopt":
+                search_alg = BayesOptSearch(random_search_steps=trial_amount/10)
+                search_alg = ConcurrencyLimiter(search_alg, max_concurrent=max_workers)
+            elif search_algo == "hyperopt":
+                search_alg = HyperOptSearch(n_initial_points=trial_amount/10, points_to_evaluate=None)
+                search_alg = ConcurrencyLimiter(search_alg, max_concurrent=max_workers)
+            else:
+                raise Exception("You chose a Search Algorithm that is not available, please choose from this list: bayesopt, hyperopt")
+
+            #run the optimization
+            #result = tune.run(objective, config=parameter_range, metric="specific_profit", search_alg=search_alg, mode="max", num_samples=trial_amount, verbose=verbose, keep_checkpoints_num=0, checkpoint_score_attr="specific_profit", log_to_file=False, server_port=8080, reuse_actors=False)
+            result = tune.run(Objective, stop={"training_iteration": 1}, config=parameter_range, num_samples=trial_amount, search_alg=search_alg, mode="max", metric="specific_profit")
+
+            #get old labels profit
+            if old_labels_available:
+                window = data.iloc[i*window_size:(i+1)*window_size,[0]].copy().reset_index(drop=True)
+                window["bsh"] = self["labels", 0, i*window_size:(i+1)*window_size, ["feature_extraction"]]
+
+                old_specific_profit, _ = calculate_profit(np.array(window), trading_fee)
+
+                #save the new labels
+                if old_specific_profit < result.best_result["specific_profit"]:
+                    #get the new labels
+                    labels = objective(result.get_best_config(), only_labeling=True)
+                    #save them
+                    data.iloc[i*window_size:(i+1)*window_size,4] = np.array(labels)
+
+                #save the old labels
+                else:
+                    data.iloc[i*window_size:(i+1)*window_size,4] = np.array(window["bsh"])
+
+            #incase there are no old labels:
+            else:
+                #get the new labels
+                labels = objective(result.get_best_config(), only_labeling=True)
+                #save them
+                data.iloc[i*window_size:(i+1)*window_size,4] = np.array(labels)
+
+        #save the labels
+        if os.path.isfile(f"{self.path}/labels_0"):
+            #read in the old labels
+            labels = pd.read_csv(f"{self.path}/labels_0", index_col=0)
+            #replace the labels
+            labels["feature_extraction"] = data["bsh"]
+            #save csv
+            labels.to_csv(path_or_buf=f"{self.path}/labels_0",index_label="index")
+        else:
+            #create labels df
+            labels = pd.DataFrame()
+            labels["feature_extraction"] = data["bsh"]
+            #save csv
+            labels.to_csv(path_or_buf=f"{self.path}/labels_0",index_label="index")
+
+        #get the performance
+        profit, _ = calculate_profit(input_array=np.array(data.iloc[:,[0,4]]), trading_fee=trading_fee)
+
+        #save the performance
+        self.dbid["alm_optimal"]["feature_extraction"] = {"specific_profit": profit, "trading_fee": trading_fee}
+        self.dbid.dump()
 
     def optimize(self, trial_amount, search_algo="bayesopt", max_workers=8, trading_fee=0.075, verbose=1):
         """
@@ -495,38 +629,6 @@ class TrainDataBase(DataBase):
             #save to csv
             df.to_csv(path_or_buf=f"{self.path}/labels_{index}", index_label="index")
 
-    def check_labeling(self, labeling_method="feature_extraction"):
-        """
-        Description:
-            Displays the best current labeling config in a plot
-        """
-        #get the labels
-        label_list = self._labeling(labeling_method="feature_extraction")
-        
-        #get the price data
-        data = pd.DataFrame()
-        for index, raw_data in enumerate(self.raw_data):
-            df = pd.DataFrame()
-            df["close"] = raw_data["close"].copy()
-            df["bsh"] = label_list[index]
-            data = pd.concat([data, df], axis=0)
-        
-        data["hold"] = np.nan
-        data["buy"] = np.nan
-        data["sell"] = np.nan
-        data.loc[data["bsh"] == 0, "hold"] = data["close"]
-        data.loc[data["bsh"] == 1, "buy"] = data["close"]
-        data.loc[data["bsh"] == 2, "sell"] = data["close"]
-
-        fig, ax = plt.subplots()
-
-        ax.plot(data.loc[:,"close"])
-        ax.plot(data.loc[:,"hold"], linestyle="", marker="o", color="gray")
-        ax.plot(data.loc[:,"buy"], linestyle="", marker="o", color="green")
-        ax.plot(data.loc[:,"sell"], linestyle="", marker="o", color="red")
-
-        plt.show()
-
     def get_amount_trades(self, labeling_method="feature_extraction"):
         """
         Description:
@@ -597,6 +699,60 @@ class TrainDataBase(DataBase):
                 mode = 'buy'
         
         return (pos_trades, neg_trades)
+
+    def dashboard(self):
+        app = dash.Dash()
+
+        app.layout = html.Div([
+            dcc.Tabs(id="tabs", value="overview-tab", children=[
+                dcc.Tab(label="Overview", value="overview-tab"),
+                dcc.Tab(label="Manual Labeling", value="manual-labeling-tab"),
+                dcc.Tab(label="Manual Labeling Opt", value="manual-labeling-opt-tab"),
+            ]),
+            html.Div(id="page-content")
+        ])
+        
+        data = self["raw_data", 0, :, ["close_time", "open", "high", "low", "close"]]
+        data2 = self["raw_data", 0, :, ["close_time", "close"]]
+
+        graph_config = {
+            "scrollZoom": True,
+            "showAxisDragHandles": True,
+            "showAxisRangeEntryBoxes": True
+        }
+        fig = px.line(data2, x="close_time", y="close", range_x=["2020-05-01", "2020-07-30"])
+
+        graph = dcc.Graph(figure=fig, id="graph", config=graph_config)
+
+        page1_overview_layout = html.Div([
+            html.H1("Overview"),
+            graph
+        ])
+
+        page2_manual_labeling_layout = html.Div([
+            html.H1("Manual Labeling")
+        ])
+
+        page3_manual_labling_opt_layout = html.Div([
+            html.H1("Manual Labeling Opt")
+        ])
+
+        page_404_layout = html.Div([
+            html.H1("404 your link does not exist")
+        ])
+
+        #page tabs callback function
+        @app.callback(dash.dependencies.Output("page-content", "children"),
+                      dash.dependencies.Input("tabs", "value"))
+        def display_page(tab):
+            if tab == "overview-tab":
+                return page1_overview_layout
+            elif tab == "manual-labeling-tab":
+                return page2_manual_labeling_layout
+            elif tab == "manual-labeling-opt-tab":
+                return page3_manual_labling_opt_layout
+
+        app.run_server(debug=True)
 
     @classmethod
     def create(cls, save_path, symbol, date_list, candlestick_interval="1m"):
@@ -815,4 +971,5 @@ class PerformanceAnalyticsDatabaseWrapper(Wrapper):
         shutil.rmtree(f"{self.path}/{self.id}")
 
 if __name__ == "__main__":
-    pass
+    tdb = TrainDataBase("C:/Users/fabio/Desktop/projectastro/databases/TrainDatabases/test_tdb")
+    tdb._feature_extraction_labeling(window_size=60, trading_fee=0.075, search_algo="hyperopt", trial_amount=10, max_workers=1, verbose=2)
